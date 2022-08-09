@@ -1517,14 +1517,13 @@ pub const Path = struct {
         defer str_slice.deinit();
         var str = str_slice.slice();
 
-        const out = if (!isWindows)
-            PathHandler.normalizeStringNode(str, &buf, .posix)
+        var out: JSC.ZigString = if (!isWindows)
+            JSC.ZigString.init(PathHandler.normalizeStringNode(str, &buf, .posix))
         else
-            PathHandler.normalizeStringNode(str, &buf, .windows);
+            JSC.ZigString.init(PathHandler.normalizeStringNode(str, &buf, .windows));
 
-        var out_str = JSC.ZigString.init(out);
-        if (str_slice.allocated) out_str.setOutputEncoding();
-        return out_str.toValueGC(globalThis);
+        if (str_slice.allocated) out.setOutputEncoding();
+        return out.toValueGC(globalThis);
     }
     pub fn parse(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();

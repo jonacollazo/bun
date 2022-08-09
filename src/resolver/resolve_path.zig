@@ -354,9 +354,15 @@ pub fn relativeAlloc(allocator: std.mem.Allocator, from: []const u8, to: []const
 pub fn normalizeStringGeneric(path: []const u8, buf: []u8, comptime allow_above_root: bool, comptime separator: u8, comptime isSeparator: anytype, _: anytype, comptime preserve_trailing_slash: bool) []u8 {
     var r: usize = 0;
     var dotdot: usize = 0;
-    var buf_i: usize = 0;
+    var buf_index: usize = 0;
 
     const n = path.len;
+
+    if (allow_above_root) {
+        buf[buf_index] = '/';
+        buf_index = 1;
+        dotdot = 1;
+    }
 
     while (r < n) {
         // empty path element
@@ -375,20 +381,20 @@ pub fn normalizeStringGeneric(path: []const u8, buf: []u8, comptime allow_above_
         if (@"is .."(path[r..]) and (r + 2 == n or isSeparator(path[r + 2]))) {
             r += 2;
             // .. element: remove to last separator
-            if (buf_i > dotdot) {
-                buf_i -= 1;
-                while (buf_i > dotdot and !isSeparator(buf[buf_i])) {
-                    buf_i -= 1;
+            if (buf_index > dotdot) {
+                buf_index -= 1;
+                while (buf_index > dotdot and !isSeparator(buf[buf_index])) {
+                    buf_index -= 1;
                 }
-            } else if (allow_above_root) {
-                if (buf_i > 0) {
-                    buf[buf_i..][0..3].* = [_]u8{ separator, '.', '.' };
-                    buf_i += 3;
-                } else {
-                    buf[buf_i..][0..2].* = [_]u8{ '.', '.' };
-                    buf_i += 2;
+            } else if (!allow_above_root) {
+                if (buf_index > 0) {
+                    buf[buf_index] = separator;
+                    buf_index += 1;
                 }
-                dotdot = buf_i;
+
+                buf[buf_index..][0..2].* = [_]u8{ '.', '.' };
+                buf_index += 2;
+                dotdot = buf_index;
             }
 
             continue;
@@ -396,27 +402,28 @@ pub fn normalizeStringGeneric(path: []const u8, buf: []u8, comptime allow_above_
 
         // real path element.
         // add slash if needed
-        if (buf_i != 0 and !isSeparator(buf[buf_i - 1])) {
-            buf[buf_i] = separator;
-            buf_i += 1;
+
+        if ((allow_above_root and buf_index != 1) or (!allow_above_root and buf_index != 0)) {
+            buf[buf_index] = separator;
+            buf_index += 1;
         }
 
-        const from = r;
-        while (r < n and !isSeparator(path[r])) : (r += 1) {}
-        const count = r - from;
-        @memcpy(buf[buf_i..].ptr, path[from..].ptr, count);
-        buf_i += count;
+        while (r < n and !isSeparator(path[r])) {
+            buf[buf_index] = path[r];
+            buf_index += 1;
+            r += 1;
+        }
     }
 
     if (preserve_trailing_slash) {
         // Was there a trailing slash? Let's keep it.
-        if (buf_i > 0 and path[path.len - 1] == separator and buf[buf_i] != separator) {
-            buf[buf_i] = separator;
-            buf_i += 1;
+        if (buf_index > 0 and path[path.len - 1] == separator and buf[buf_index] != separator) {
+            buf[buf_index] = separator;
+            buf_index += 1;
         }
     }
 
-    return buf[0..buf_i];
+    return buf[0..buf_index];
 }
 
 pub const Platform = enum {
@@ -672,35 +679,32 @@ pub fn join(_parts: anytype, comptime _platform: Platform) []const u8 {
 pub fn joinStringBuf(buf: []u8, _parts: anytype, comptime _platform: Platform) []const u8 {
     if (FeatureFlags.use_std_path_join) {
         var alloc = std.heap.FixedBufferAllocator.init(buf);
-        return std.fs.path.join(&alloc.allocator, _parts) catch unreachable;
+        return std.fs.path.join(&alloc.allocator, _parts) catch @panic("caught something");
+    }
+    var size: usize = _parts.len;
+    for (_parts) |path| size += path.len;
+
+    if (size == 0) {
+        buf[0] = '.';
+        return buf[0..1];
     }
 
     var written: usize = 0;
     const platform = comptime _platform.resolve();
     var temp_buf: [4096]u8 = undefined;
-    temp_buf[0] = 0;
 
     for (_parts) |part| {
-        if (part.len == 0) {
-            continue;
+        if (part.len > 0) {
+            if (written > 0) {
+                temp_buf[written] = platform.separator();
+                written += 1;
+            }
+
+            for (part) |piece| {
+                temp_buf[written] = piece;
+                written += 1;
+            }
         }
-
-        if (written > 0) {
-            temp_buf[written] = platform.separator();
-            written += 1;
-        }
-
-        std.mem.copy(
-            u8,
-            temp_buf[written..],
-            part,
-        );
-        written += part.len;
-    }
-
-    if (written == 0) {
-        buf[0] = '.';
-        return buf[0..1];
     }
 
     return normalizeStringNode(temp_buf[0..written], buf, platform);
@@ -716,13 +720,16 @@ pub fn joinAbsStringBufZ(_cwd: []const u8, buf: []u8, _parts: anytype, comptime 
 
 inline fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: type, _cwd: []const u8, buf: []u8, _parts: anytype, comptime _platform: Platform) ReturnType {
     var parts: []const []const u8 = _parts;
-    var temp_buf: [bun.MAX_PATH_BYTES * 2]u8 = undefined;
+    // var temp_buf: [bun.MAX_PATH_BYTES * 2]u8 = undefined;
+    std.debug.print("Parts -> {}\n", .{parts.len});
     if (parts.len == 0) {
         if (comptime is_sentinel) {
-            unreachable;
+            @panic("why am I here");
         }
         return _cwd;
     }
+
+    std.debug.print("P1\n", .{});
 
     if ((comptime _platform == .loose or _platform == .posix) and
         parts.len == 1 and
@@ -732,67 +739,94 @@ inline fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: typ
         return "/";
     }
 
-    var out: usize = 0;
-    var cwd = _cwd;
+    std.debug.print("P2 {}\n", .{parts.len});
 
-    {
-        var part_i: u16 = 0;
-        var part_len: u16 = @truncate(u16, parts.len);
+    // Looking from right to left for an index containing
+    // an absolute path
+    var index: usize = parts.len - 1;
 
-        while (part_i < part_len) {
-            if (_platform.isAbsolute(parts[part_i])) {
-                cwd = parts[part_i];
-                parts = parts[part_i + 1 ..];
-
-                part_len = @truncate(u16, parts.len);
-                part_i = 0;
-                continue;
-            }
-            part_i += 1;
+    while (index > 0) {
+        std.debug.print("index {}\n", .{index});
+        if (_platform.isAbsolute(parts[index])) {
+            break;
         }
+        index -= 1;
     }
 
-    std.mem.copy(u8, &temp_buf, cwd);
-    out = cwd.len;
+    std.debug.print("ABS -> i={} | l={}\n", .{ index, parts.len });
 
-    for (parts) |_part| {
-        if (_part.len == 0) {
-            continue;
-        }
+    const result = joinStringBuf(buf, parts[index .. parts.len - 1], _platform);
+    std.debug.print("RR -> {s}\n", .{result});
+    return result;
 
-        var part = _part;
+    //    var out: usize = 0;
+    //    var cwd = _cwd;
+    //
+    //    {
+    //        var part_i: u16 = 0;
+    //        var part_len: u16 = @truncate(u16, parts.len);
+    //
+    //        while (part_i < part_len) {
+    //            if (_platform.isAbsolute(parts[part_i])) {
+    //                cwd = parts[part_i];
+    //                parts = parts[part_i + 1 ..];
+    //
+    //                part_len = @truncate(u16, parts.len);
+    //                part_i = 0;
+    //                continue;
+    //            }
+    //            part_i += 1;
+    //        }
+    //    }
+    //
+    //    std.mem.copy(u8, &temp_buf, cwd);
+    //    out = cwd.len;
+    //
+    //    for (parts) |_part| {
+    //        if (_part.len == 0) {
+    //            continue;
+    //        }
+    //
+    //        var part = _part;
+    //
+    //        if (out > 0 and temp_buf[out - 1] != _platform.separator()) {
+    //            temp_buf[out] = _platform.separator();
+    //            out += 1;
+    //        }
+    //
+    //        std.mem.copy(u8, temp_buf[out..], part);
+    //        out += part.len;
+    //    }
+    //
+    //    const leading_separator: []const u8 =
+    //        if (_platform.leadingSeparatorIndex(temp_buf[0..out])) |i|
+    //        temp_buf[0 .. i + 1]
+    //    else
+    //        "/";
+    //
+    // std.debug.print("PreN -> {s}\n", .{temp_buf});
 
-        if (out > 0 and temp_buf[out - 1] != _platform.separator()) {
-            temp_buf[out] = _platform.separator();
-            out += 1;
-        }
-
-        std.mem.copy(u8, temp_buf[out..], part);
-        out += part.len;
-    }
-
-    const leading_separator: []const u8 =
-        if (_platform.leadingSeparatorIndex(temp_buf[0..out])) |i|
-        temp_buf[0 .. i + 1]
-    else
-        "/";
-
-    const result = normalizeStringBuf(
-        temp_buf[leading_separator.len..out],
-        buf[leading_separator.len..],
-        false,
-        _platform,
-        true,
-    );
-
-    std.mem.copy(u8, buf[0..leading_separator.len], leading_separator);
-
-    if (comptime is_sentinel) {
-        buf.ptr[result.len + leading_separator.len + 1] = 0;
-        return buf[0 .. result.len + leading_separator.len :0];
-    } else {
-        return buf[0 .. result.len + leading_separator.len];
-    }
+    //    const result = normalizeStringBuf(
+    //        temp_buf[leading_separator.len..out],
+    //        buf[leading_separator.len..],
+    //        false,
+    //        _platform,
+    //        false,
+    //    );
+    //
+    //    std.debug.print("PostN -> {s}\n", .{result});
+    //
+    //    std.mem.copy(u8, buf[0..leading_separator.len], leading_separator);
+    //
+    //    // std.debug.print("PostC -> {s}\n", .{buf});
+    //    std.debug.print("PostL -> {s}\n", .{leading_separator});
+    //
+    //    if (comptime is_sentinel) {
+    //        buf.ptr[result.len + leading_separator.len + 1] = 0;
+    //        return buf[0 .. result.len + leading_separator.len :0];
+    //    } else {
+    //        return buf[0 .. result.len + leading_separator.len];
+    //    }
 }
 
 pub fn isSepPosix(char: u8) bool {
@@ -874,11 +908,11 @@ pub fn normalizeStringNode(
         return buf[0..1];
     }
 
-    const is_absolute = platform.isAbsolute(str);
+    const is_absolute: bool = platform.isAbsolute(str);
     const trailing_separator = platform.isSeparator(str[str.len - 1]);
     var buf_ = buf[1..];
 
-    var out = if (!is_absolute) normalizeStringGeneric(
+    var out = if (is_absolute) normalizeStringGeneric(
         str,
         buf_,
         true,
@@ -916,11 +950,6 @@ pub fn normalizeStringNode(
             buf_[out.len] = platform.separator();
             out = buf_[0 .. out.len + 1];
         }
-    }
-
-    if (is_absolute) {
-        buf[0] = platform.separator();
-        out = buf[0 .. out.len + 1];
     }
 
     return out;
